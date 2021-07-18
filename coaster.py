@@ -1,8 +1,27 @@
-#! /usr/bin/python2
-
+#!/usr/bin/env python
+import os
 import time
+import json
 import sys
+import datetime
+from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
+import RPi.GPIO as GPIO
 
+from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
+
+#Init AWSIoTMQTTClient
+myMQTTClient = AWSIoTMQTTClient("raspberry-pi")
+myMQTTClient.configureEndpoint("a25lv8edwvpzsv-ats.iot.ap-northeast-1.amazonaws.com", 8883)
+myMQTTClient.configureCredentials("/home/pi/cert/AmazonRootCA1.pem", "/home/pi/cert/50b0377edf-private.pem.key", "/home/pi/cert/50b0377edf-certificate.pem.crt")
+
+#AWSIoTMQTTClient connection config
+myMQTTClient.configureOfflinePublishQueueing(-1)
+myMQTTClient.configureDrainingFrequency(2)
+myMQTTClient.configureConnectDisconnectTimeout(10)
+myMQTTClient.configureMQTTOperationTimeout(5)
+
+
+#loadcell config
 EMULATE_HX711=False
 
 #referenceUnit = 1
@@ -41,16 +60,16 @@ hx.set_reading_format("MSB", "MSB")
 # If 2000 grams is 184000 then 1000 grams is 184000 / 2000 = 92.
 hx.set_reference_unit(referenceUnit)
 #hx.set_reference_unit(referenceUnit)
-
 hx.reset()
-
 hx.tare()
 
-print("Tare done! Add weight now...")
+#connect and subscribe to AWS IoT
+myMQTTClient.connect()
 
-# to use both channels, you'll need to tare them both
-#hx.tare_A()
-#hx.tare_B()
+#Initial
+time.sleep(2)
+
+topic = "sensor/weight"
 
 while True:
     try:
@@ -63,8 +82,18 @@ while True:
         # print binary_string + " " + np_arr8_string
         
         # Prints the weight. Comment if you're debbuging the MSB and LSB issue.
-        val = hx.get_weight(5)
-        print(val)
+        val = round(hx.get_weight(5))
+        nowtime = datetime.datetime.now()
+        print(str(datetime.datetime.now()) +","+ str(val))
+        data = {
+            'device': "pi",
+            'date':str(datetime.date.today()),
+            'time':str(nowtime.hour)+":"+str(nowtime.minute)+":"+str(nowtime.second),
+            'weight': val
+        }
+        print(data)
+        #print(val)
+        myMQTTClient.publish(topic, json.dumps(data), 1)
 
         # To get weight from both channels (if you have load cells hooked up 
         # to both channel A and B), do something like this
@@ -74,7 +103,42 @@ while True:
 
         hx.power_down()
         hx.power_up()
-        time.sleep(0.1)
+        time.sleep(1)
 
     except (KeyboardInterrupt, SystemExit):
         cleanAndExit()
+
+
+#----------------------------------------------------------------
+#	Note:
+#		ds18b20's data pin must be connected to pin7(GPIO4).
+#----------------------------------------------------------------
+
+# Reads temperature from sensor and prints to stdout
+# id is the id of the sensor
+def readSensor(id):
+	tfile = open("/sys/bus/w1/devices/"+id+"/w1_slave")
+	text = tfile.read()
+	tfile.close()
+	secondline = text.split("\n")[1]
+	temperaturedata = secondline.split(" ")[9]
+	temperature = float(temperaturedata[2:])
+	temperature = temperature / 1000
+	myMQTTClient.connect()
+	myMQTTClient.publish("myTopic", temperature, 0)
+	#print "Sensor: " + id  + " - Current temperature : %0.3f C" % temperature
+
+
+# Reads temperature from all sensors found in /sys/bus/w1/devices/
+# starting with "28-...
+def readSensors():
+	count = 0
+	sensor = ""
+	for file in os.listdir("/sys/bus/w1/devices/"):
+		if (file.startswith("28-")):
+			readSensor(file)
+			count+=1
+	if (count == 0):
+		myMQTTClient.connect()
+		myMQTTClient.publish("myTopic", "sensor found! Check connection", 0)
+		#print "No sensor found! Check connection"
